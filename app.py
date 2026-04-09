@@ -561,6 +561,30 @@ def append_dict(ws, d, headers=None):
     _retry_gs(ws.append_row, row, value_input_option="USER_ENTERED")
 
 
+def get_resume_case_idx(admissions_df: pd.DataFrame, responses_df: pd.DataFrame) -> int:
+    """
+    Return the first admission index without a saved step-1 response.
+    If all admissions are already completed, return len(admissions_df).
+    """
+    if admissions_df.empty:
+        return 0
+
+    if responses_df.empty or "case_id" not in responses_df.columns:
+        return 0
+
+    completed = responses_df.copy()
+    if "step" in completed.columns:
+        completed = completed[pd.to_numeric(completed["step"], errors="coerce") == 1]
+
+    completed_case_ids = set(completed["case_id"].astype(str))
+    admission_case_ids = admissions_df["case_id"].astype(str).tolist()
+
+    for idx, admission_case_id in enumerate(admission_case_ids):
+        if admission_case_id not in completed_case_ids:
+            return idx
+    return len(admissions_df)
+
+
 # ================== App state ==================
 def init_state():
     if "entered" not in st.session_state:
@@ -574,6 +598,8 @@ def init_state():
     if "jump_to_top" not in st.session_state:
         # start at top on first load
         st.session_state.jump_to_top = True
+    if "resume_applied" not in st.session_state:
+        st.session_state.resume_applied = False
 
 
 init_state()
@@ -658,6 +684,10 @@ for _c in ["day_start", "day_end"]:
 if admissions.empty:
     st.error("Admissions sheet is empty. Add rows to 'admissions' with: case_id,title,discharge_summary,weight_kg")
     st.stop()
+
+if not st.session_state.resume_applied:
+    st.session_state.case_idx = get_resume_case_idx(admissions, responses)
+    st.session_state.resume_applied = True
 
 # ================== Current case ==================
 if st.session_state.case_idx >= len(admissions):
