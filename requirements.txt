@@ -8,3 +8,4 @@ markdown
 pymdown-extensions
 streamlit-js-eval
 numpy
+pytz
