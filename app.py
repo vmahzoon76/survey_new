@@ -564,9 +564,9 @@ def append_dict(ws, d, headers=None):
 # ================== App state ==================
 def init_state():
     if "entered" not in st.session_state:
-        st.session_state.entered = False
+        st.session_state.entered = True
     if "reviewer_id" not in st.session_state:
-        st.session_state.reviewer_id = ""
+        st.session_state.reviewer_id = "open_access"
     if "case_idx" not in st.session_state:
         st.session_state.case_idx = 0
     if "step" not in st.session_state:
@@ -583,91 +583,9 @@ if st.session_state.get("jump_to_top"):
     _scroll_top()
     st.session_state.jump_to_top = False
 
-# ================== Sign-in ==================
 with st.sidebar:
-    st.subheader("Sign in")
-    rid = st.text_input("Your name or ID", value=st.session_state.reviewer_id)
-    if st.button("Enter"):
-        if rid.strip():
-            st.session_state.reviewer_id = rid.strip()
-            st.session_state.entered = True
-            st.session_state.step = 1
-            st.session_state.jump_to_top = True
-            _scroll_top()
-            time.sleep(0.25)
-            _rerun()
-
-        # --- Forgot ID: show known reviewers from 'responses' sheet ---
-    st.divider()
-    if st.button("Forgot your ID?"):
-        try:
-            sh = _open_sheet_cached()  # uses st.secrets['gsheet_id']
-            try:
-                ws = _retry_gs(sh.worksheet, "responses")
-            except RuntimeError:
-                st.warning("No 'responses' sheet found yet.")
-            else:
-                recs = _retry_gs(ws.get_all_records)
-                df = pd.DataFrame(recs)
-
-                if df.empty or "reviewer_id" not in df.columns:
-                    st.info("No reviewers have submitted responses yet.")
-                else:
-                    # Clean and summarize
-                    df["timestamp_et"] = pd.to_datetime(df.get("timestamp_et"), errors="coerce")
-                    df["reviewer_id"] = df["reviewer_id"].astype(str).str.strip()
-
-                    grp = (
-                        df.loc[df["reviewer_id"] != ""]
-                        .groupby("reviewer_id", as_index=False)
-                        .agg(submissions=("reviewer_id", "size"),
-                             last_seen=("timestamp_et", "max"))
-                    )
-                    grp = grp.sort_values(["submissions", "last_seen"], ascending=[False, False])
-
-                    st.caption("Known reviewers (from Responses):")
-                    st.dataframe(grp, use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.error(f"Could not load reviewers: {e}")
-
-if not st.session_state.entered:
-    _scroll_top()
-    st.markdown(
-        """
-        ## Annotation Task for AKI diagnosis
-
-        ### Goal
-        Read a discharge summary and conclude:
-        1. Did the note writer think the patient had AKI?  
-        2. Do *you* think the patient had AKI?  
-        3. Briefly justify your answers.  
-        4. Highlight the supporting text.
-
-        ### How to Decide
-        Count any **acute worsening of kidney function during this admission** as AKI — including:
-        * acute renal failure (ARF)  
-        * acute kidney injury (AKI)  
-        * acute on chronic  
-        * acute tubular necrosis (ATN)  
-        * acute renal insufficiency  
-
-        ### Do Not Count
-        • Chronic kidney disease (CKD) or ESRD alone  
-        • Past AKI from previous admissions  
-        • Statements clearly ruling out AKI (e.g., "no AKI," "renal function stable")  
-
-        ### Remember
-        • Sometimes the note writer's belief and *your* belief may differ.  
-        • Focus only on **this admission**.
-
-        ### Contact
-        If you encounter technical issues or questions:  
-        **Vahid Mahzoon** — tun53200@temple.edu
-        """
-    )
-
-    st.info("Please sign in with your Reviewer ID to begin.")
-    st.stop()
+    st.subheader("Access")
+    st.caption("Open access mode is enabled. All prior annotations from `prev_aki` and all structured data are visible to any viewer.")
 
 # ================== Load data from Google Sheets ==================
 try:
@@ -717,7 +635,7 @@ admissions = _read_ws_df(st.secrets["gsheet_id"], "admissions")
 responses = _read_ws_df(st.secrets["gsheet_id"], "responses")
 labs = _read_ws_df(st.secrets["gsheet_id"], "labs")
 inputs = _read_ws_df(st.secrets["gsheet_id"], "inputs")
-avi_round2 = _read_ws_df(st.secrets["gsheet_id"], "avi_round2")
+prev_aki = _read_ws_df(st.secrets["gsheet_id"], "prev_aki")
 baseline_df = _read_ws_df(st.secrets["gsheet_id"], "baseline")
 proc_df = _read_ws_df(st.secrets["gsheet_id"], "proc")
 icd_df = _read_ws_df(st.secrets["gsheet_id"], "icd")
@@ -744,57 +662,6 @@ for _c in ["day_start", "day_end"]:
 if admissions.empty:
     st.error("Admissions sheet is empty. Add rows to 'admissions' with: case_id,title,discharge_summary,weight_kg")
     st.stop()
-
-# ===== Resume progress for this reviewer (run once per sign-in) =====
-if st.session_state.entered and not st.session_state.get("progress_initialized"):
-    try:
-        resp = responses.copy()
-        rid = str(st.session_state.reviewer_id)
-
-        # Filter for this reviewer only
-        if not resp.empty:
-            resp = resp[resp["reviewer_id"].astype(str) == rid]
-        else:
-            resp = resp  # leave empty
-
-        # Normalize types
-        if not resp.empty and "step" in resp.columns:
-            resp["step"] = pd.to_numeric(resp["step"], errors="coerce").fillna(0).astype(int)
-        else:
-            resp["step"] = []
-
-        # Sets of finished/started cases
-        # Every saved Step 1 now counts as completed
-        completed_ids = set(resp.loc[resp["step"] == 1, "case_id"].astype(str)) if not resp.empty else set()
-
-        # Find first admission not fully completed
-        target_idx = None
-        target_step = 1
-        for idx, row in admissions.reset_index(drop=True).iterrows():
-            cid = str(row.get("case_id", ""))
-            if cid in completed_ids:
-                continue
-            target_idx = idx
-            target_step = 1
-            break
-
-        if target_idx is not None:
-            st.session_state.case_idx = int(target_idx)
-            st.session_state.step = int(target_step)
-        else:
-            # All admissions completed by this reviewer
-            st.session_state.case_idx = len(admissions)
-            st.session_state.step = 1
-
-    except Exception as e:
-        st.warning(f"Could not auto-resume progress: {e}")
-
-    # Mark done and refresh to land on the right case/step
-    st.session_state.progress_initialized = True
-    st.session_state.jump_to_top = True
-    _scroll_top()
-    time.sleep(0.15)
-    _rerun()
 
 # ================== Current case ==================
 if st.session_state.case_idx >= len(admissions):
@@ -841,7 +708,7 @@ else:
     case_inputs["end_hours"] = pd.NA
 
 st.caption(
-    f"Reviewer: **{st.session_state.reviewer_id}** • "
+    f"Mode: **Open access** • "
     f"Admission {st.session_state.case_idx + 1}/{len(admissions)} • "
 )
 st.markdown(f"### {case_id} — {title}")
@@ -856,57 +723,34 @@ with left:
     else:
         inline_highlighter(summary, case_id=case_id, step_key="step2", height=700)
 
-    # ---- ADD THIS BLOCK ----
-    # Show prior labels for this case from avi_round2
-    # ---- UPDATED BLOCK ----
-    if not avi_round2.empty and "case_id" in avi_round2.columns:
-        case_label = avi_round2[avi_round2["case_id"].astype(str) == case_id]
+    if not prev_aki.empty and "case_id" in prev_aki.columns:
+        case_label = prev_aki[prev_aki["case_id"].astype(str) == case_id]
         if not case_label.empty:
             row = case_label.iloc[0]
-            rid = st.session_state.reviewer_id
-
-            reviewer_col_map = {
-                "avig13": ("aki_avig13", "rationale_aki_avig13", "aki_own_avig13", "rational_aki_own_avig13",
-                           "extracted_highlights_avig13", "aki_surprise_avig13"),
-                "ojeniys": ("aki_ojeniys", "rationale_aki_ojeniys", "aki_own_ojeniys", "rational_aki_own_ojeniys",
-                            "extracted_highlights_ojeniys", "aki_surprise_ojeniys"),
-                "Sheetal": ("aki_Sheetal", "rationale_aki_Sheetal", "aki_own_Sheetal", "rational_aki_own_Sheetal",
-                            "extracted_highlights_Sheetal", "aki_surprise_Sheetal"),
-                "toby efferen": ("aki_toby efferen", "rationale_aki_toby efferen", "aki_own_toby efferen", "rational_aki_own_toby efferen",
-                            "extracted_highlights_toby efferen", "aki_surprise_toby efferen"),
-            }
 
             st.markdown("### Prior Annotation")
             with st.container(border=True):
-                if rid in reviewer_col_map:
-                    aki_col, rat_col, aki_own_col, rat_own_col, hl_col, surprise_col = reviewer_col_map[rid]
-                
-                    def _show(label, col):
-                        val = str(row.get(col, '')).strip()
-                        if val and val.lower() not in ('nan', 'none', ''):
-                            st.markdown(f"**{label}:** {val}")
-                
-                    _show("Your prior AKI label (note writer opinion)", aki_col)
-                    _show("Rationale", rat_col)
-                    _show("Your prior AKI label (personal opinion)", aki_own_col)
-                    _show("Rationale", rat_own_col)
-                    _show("Extracted Highlights", hl_col)
-                    _show("Surprise if patient had AKI", surprise_col)
-                else:
-                    st.info("No prior annotation found for your reviewer ID.")
+                reviewer_specs = [
+                    ("Sheetal", "new_aki_Sheetal", "new_rational_aki_Sheetal"),
+                    ("avig13", "new_aki_avig13", "new_rational_aki_avig13"),
+                    ("ojeniys", "new_aki_ojeniys", "new_rational_aki_ojeniys"),
+                ]
 
-                # Adjudication — show even if no rationale
-                if rid != "toby efferen":
-                    adj_aki = row.get('aki_Adjudication', '')
-                    adj_rationale = row.get('rationale_aki_Adjudication', '')
-                    if str(adj_aki).strip() not in ('', 'nan', 'None'):
+                def _clean_display(val):
+                    text = str(val).strip()
+                    return "" if text.lower() in {"", "nan", "none"} else text
+
+                for reviewer_name, aki_col, rationale_col in reviewer_specs:
+                    aki_val = _clean_display(row.get(aki_col, ""))
+                    rationale_val = _clean_display(row.get(rationale_col, ""))
+                    st.markdown(f"**{reviewer_name}**")
+                    st.markdown(f"AKI Label: {aki_val or 'Not available'}")
+                    st.markdown(f"Rationale: {rationale_val or 'Not available'}")
+                    if reviewer_name != reviewer_specs[-1][0]:
                         st.markdown("---")
-                        st.markdown(f"**Adjudicated AKI Label (note writer opinion):** {adj_aki}")
-                        if str(adj_rationale).strip() not in ('', 'nan', 'None'):
-                            st.markdown(f"**Rationale for Adjudicated AKI:** {adj_rationale}")
 
 with right:
-    st.markdown("## Lab Values, Vitals, and ICD Codes")
+    st.markdown("## Structured Data")
 
     # Get patient blurb
     blurb = make_patient_blurb(age, gender, weight)
@@ -983,355 +827,342 @@ with right:
     #
     # st.markdown("---")
 
-    # ======== ALWAYS SHOW: Creatinine ========
-    # Replace the SCr chart block with this:
-    st.markdown("**Serum Creatinine (mg/dL)**")
-    scr_data = lab_groups['scr'].sort_values("timestamp")
+    tabs = st.tabs([
+        "Creatinine",
+        "Urine Output",
+        "Blood Pressure",
+        "Temperature",
+        "Potassium",
+        "BUN",
+        "Lasix",
+        "IV Intake",
+        "Procedures",
+        "Diagnoses"
+    ])
 
-    if not scr_data.empty and pd.notna(admit_ts) and scr_data["hours"].notna().any():
 
-        # Check for baseline
-        bl_row = None
-        if not baseline_df.empty and "case_id" in baseline_df.columns:
-            bl_match = baseline_df[baseline_df["case_id"].astype(str) == case_id]
-            if not bl_match.empty:
-                bl_row = bl_match.iloc[0]
-
-        x_start = -5 if bl_row is not None else 0
-
-        line = alt.Chart(scr_data).mark_line(point=True, color='#ef4444').encode(
-            x=alt.X("hours:Q", title="Hours since admission",
-                    scale=alt.Scale(domain=[x_start, max_tick]),
-                    axis=alt.Axis(values=tick_vals)),
-            y=alt.Y("value:Q", title="Creatinine (mg/dL)"),
-            tooltip=[
-                alt.Tooltip("timestamp:T", title="Time"),
-                alt.Tooltip("hours:Q", title="Hours since admission", format=".1f"),
-                alt.Tooltip("value:Q", title="Creatinine (mg/dL)", format=".2f"),
-                alt.Tooltip("kind:N", title="Measurement type")
-            ]
+    # Helper: build shade layer
+    def make_shade(domain_max):
+        return alt.Chart(intervals_df).mark_rect(opacity=0.4).encode(
+            x=alt.X("start:Q", scale=alt.Scale(domain=[0, domain_max])),
+            x2="end:Q",
+            color=alt.Color("label:N",
+                            legend=alt.Legend(title="Care Setting"),
+                            scale=alt.Scale(domain=["ED", "ICU", "Hospital"],
+                                            range=["#fde68a", "#bfdbfe", "#d1fae5"]))
         )
 
-        layers = [line]
+    with tabs[0]:
+        st.markdown("**Serum Creatinine (mg/dL)**")
+        scr_data = lab_groups['scr'].sort_values("timestamp")
 
-        if bl_row is not None:
-            bl_lower = float(bl_row.get("baseline_lower", 0))
-            bl_upper = float(bl_row.get("baseline_upper", 0))
-            bl_mid = (bl_lower + bl_upper) / 2
+        if not scr_data.empty and pd.notna(admit_ts) and scr_data["hours"].notna().any():
+            bl_row = None
+            if not baseline_df.empty and "case_id" in baseline_df.columns:
+                bl_match = baseline_df[baseline_df["case_id"].astype(str) == case_id]
+                if not bl_match.empty:
+                    bl_row = bl_match.iloc[0]
 
-            # Calculate y range to determine offset in data units
-            y_range = scr_data["value"].max() - scr_data["value"].min()
-            tip_offset = y_range * 0.08  # shift triangle UP by 8% of y range so tip lands on value
+            x_start = -5 if bl_row is not None else 0
 
-            bl_data = pd.DataFrame([{"x": -5, "y": bl_mid + tip_offset, "y_val": bl_mid}])
-
-            bl_arrow = alt.Chart(bl_data).mark_point(
-                shape="triangle-down",
-                color="#7c3aed",
-                size=200,
-                filled=True
-            ).encode(
-                x=alt.X("x:Q"),
-                y=alt.Y("y:Q"),  # shifted up in data units
-                tooltip=[alt.Tooltip("y_val:Q", title="Baseline avg", format=".2f")]
+            line = alt.Chart(scr_data).mark_line(point=True, color='#ef4444').encode(
+                x=alt.X("hours:Q", title="Hours since admission",
+                        scale=alt.Scale(domain=[x_start, max_tick]),
+                        axis=alt.Axis(values=tick_vals)),
+                y=alt.Y("value:Q", title="Creatinine (mg/dL)"),
+                tooltip=[
+                    alt.Tooltip("timestamp:T", title="Time"),
+                    alt.Tooltip("hours:Q", title="Hours since admission", format=".1f"),
+                    alt.Tooltip("value:Q", title="Creatinine (mg/dL)", format=".2f"),
+                    alt.Tooltip("kind:N", title="Measurement type")
+                ]
             )
 
-            bl_text = alt.Chart(bl_data).mark_text(
-                color="#7c3aed",
-                fontSize=11,
-                fontWeight="bold",
-                dy=-18,
-                dx=5
-            ).encode(
-                x=alt.X("x:Q"),
-                y=alt.Y("y:Q"),
-                text=alt.Text("y_val:Q", format=".2f")
-            )
+            layers = [line]
 
-            layers.append(bl_arrow)
-            layers.append(bl_text)
+            if bl_row is not None:
+                bl_lower = float(bl_row.get("baseline_lower", 0))
+                bl_upper = float(bl_row.get("baseline_upper", 0))
+                bl_mid = (bl_lower + bl_upper) / 2
+                y_range = scr_data["value"].max() - scr_data["value"].min()
+                tip_offset = y_range * 0.08
+                bl_data = pd.DataFrame([{"x": -5, "y": bl_mid + tip_offset, "y_val": bl_mid}])
 
-        if not intervals_df.empty:
-            shade = alt.Chart(intervals_df).mark_rect(opacity=0.4).encode(
-                x=alt.X("start:Q", scale=alt.Scale(domain=[x_start, max_tick])),
-                x2="end:Q",
-                color=alt.Color("label:N",
-                                legend=alt.Legend(title="Care Setting"),
-                                scale=alt.Scale(domain=["ED", "ICU", "Hospital"],
-                                                range=["#fde68a", "#bfdbfe", "#d1fae5"]))
-            )
-            layers.append(shade)
-
-        chart = alt.layer(*layers).resolve_scale(color="independent")
-        st.altair_chart(chart, use_container_width=True)
-
-    else:
-        st.warning("No creatinine values available for this case.")
-
-    st.markdown("---")
-
-    # ======== OPTIONAL: Additional Lab Values, Lasix, IV fluid and ICD codes ========
-    with st.expander("**📊 Additional Lab Values, Lasix, IV fluid and ICD codes**", expanded=False):
-        tabs = st.tabs([
-            "Urine Output",
-            "Blood Pressure",
-            "Temperature",
-            "Potassium",
-            "BUN",
-            "Lasix",
-            "IV Intake",  # new
-            "Procedures",
-            "Diagnoses"
-        ])
-
-
-        # Helper: build shade layer
-        # make_shade helper — update the color scale:
-        def make_shade(domain_max):
-            return alt.Chart(intervals_df).mark_rect(opacity=0.4).encode(
-                x=alt.X("start:Q", scale=alt.Scale(domain=[0, domain_max])),
-                x2="end:Q",
-                color=alt.Color("label:N",
-                                legend=alt.Legend(title="Care Setting"),
-                                scale=alt.Scale(domain=["ED", "ICU", "Hospital"],
-                                                range=["#fde68a", "#bfdbfe", "#d1fae5"]))  # light green
-            )
-
-
-        # Tab 0: Urine Output
-        with tabs[0]:
-            st.markdown("**Urine Output (mL)**")
-            uo_data = lab_groups['uo'].sort_values("timestamp")
-
-            if not uo_data.empty and pd.notna(admit_ts) and uo_data["hours"].notna().any():
-                uo_data['source'] = uo_data['kind'].str.title()
-                chart = alt.Chart(uo_data).mark_point(size=70, filled=True).encode(
-                    x=alt.X("hours:Q",
-                            title="Hours since admission",
-                            scale=alt.Scale(domain=[0, max_tick]),
-                            axis=alt.Axis(values=tick_vals)),
-                    y=alt.Y("value:Q", title="Urine Output (mL)"),
-                    color=alt.Color("source:N", legend=alt.Legend(title="Source")),
-                    tooltip=["timestamp:T", "hours:Q", "value:Q", "source:N"]
+                bl_arrow = alt.Chart(bl_data).mark_point(
+                    shape="triangle-down",
+                    color="#7c3aed",
+                    size=200,
+                    filled=True
+                ).encode(
+                    x=alt.X("x:Q"),
+                    y=alt.Y("y:Q"),
+                    tooltip=[alt.Tooltip("y_val:Q", title="Baseline avg", format=".2f")]
                 )
-                if not intervals_df.empty:
-                    final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
-                else:
-                    final = chart
-                st.altair_chart(final, use_container_width=True)
-            else:
-                st.warning("No urine output values available.")
 
-        # Tab 1: Blood Pressure
-        with tabs[1]:
-            st.markdown("**Blood Pressure (mmHg)**")
-            bp_data = lab_groups['bp'].sort_values("timestamp")
-
-            if not bp_data.empty and pd.notna(admit_ts) and bp_data["hours"].notna().any():
-                bp_data['bp_type'] = bp_data['kind'].str.extract(r'(systolic|diastolic|mean)', expand=False)
-                bp_data['bp_type'] = bp_data['bp_type'].str.title()
-
-                chart = alt.Chart(bp_data).mark_line(point=True).encode(
-                    x=alt.X("hours:Q",
-                            title="Hours since admission",
-                            scale=alt.Scale(domain=[0, max_tick]),
-                            axis=alt.Axis(values=tick_vals)),
-                    y=alt.Y("value:Q", title="Blood Pressure (mmHg)"),
-                    color=alt.Color("bp_type:N",
-                                    legend=alt.Legend(title="BP Type"),
-                                    scale=alt.Scale(domain=['Systolic', 'Diastolic', 'Mean'],
-                                                    range=['#dc2626', '#2563eb', '#059669'])),
-                    tooltip=["timestamp:T", "hours:Q", "value:Q", "bp_type:N", "kind:N"]
+                bl_text = alt.Chart(bl_data).mark_text(
+                    color="#7c3aed",
+                    fontSize=11,
+                    fontWeight="bold",
+                    dy=-18,
+                    dx=5
+                ).encode(
+                    x=alt.X("x:Q"),
+                    y=alt.Y("y:Q"),
+                    text=alt.Text("y_val:Q", format=".2f")
                 )
-                if not intervals_df.empty:
-                    final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
-                else:
-                    final = chart
-                st.altair_chart(final, use_container_width=True)
-            else:
-                st.warning("No blood pressure values available.")
 
-        # Tab 2: Temperature
-        with tabs[2]:
-            st.markdown("**Temperature (°F)**")
-            temp_data = lab_groups['temp'].sort_values("timestamp")
+                layers.append(bl_arrow)
+                layers.append(bl_text)
 
-            if not temp_data.empty and pd.notna(admit_ts) and temp_data["hours"].notna().any():
-                temp_unit = temp_data['unit'].iloc[0] if len(temp_data) > 0 else ''
-                y_min, y_max = (90, 105) if str(temp_unit).strip() in ['F', '°F', 'degF', 'f'] else (35, 42)
-                chart = alt.Chart(temp_data).mark_line(point=True, color='#f97316').encode(
-                    x=alt.X("hours:Q",
-                            title="Hours since admission",
-                            scale=alt.Scale(domain=[0, max_tick]),
-                            axis=alt.Axis(values=tick_vals)),
-                    y=alt.Y("value:Q",
-                            title=f"Temperature ({temp_unit})",
-                            scale=alt.Scale(domain=[y_min, y_max])),
-                    tooltip=["timestamp:T", "hours:Q", "value:Q", "unit:N"]
-                )
-                if not intervals_df.empty:
-                    final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
-                else:
-                    final = chart
-                st.altair_chart(final, use_container_width=True)
-            else:
-                st.warning("No temperature values available.")
-
-        # Tab 3: Potassium
-        with tabs[3]:
-            st.markdown("**Potassium (mEq/L)**")
-            k_data = lab_groups['potassium'].sort_values("timestamp")
-
-            if not k_data.empty and pd.notna(admit_ts) and k_data["hours"].notna().any():
-                chart = alt.Chart(k_data).mark_line(point=True, color='#8b5cf6').encode(
-                    x=alt.X("hours:Q",
-                            title="Hours since admission",
-                            scale=alt.Scale(domain=[0, max_tick]),
-                            axis=alt.Axis(values=tick_vals)),
-                    y=alt.Y("value:Q", title="Potassium (mEq/L)"),
-                    tooltip=["timestamp:T", "hours:Q", "value:Q"]
-                )
-                if not intervals_df.empty:
-                    final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
-                else:
-                    final = chart
-                st.altair_chart(final, use_container_width=True)
-            else:
-                st.warning("No potassium values available.")
-
-        # Tab 4: BUN
-        with tabs[4]:
-            st.markdown("**BUN (mg/dL)**")
-            bun_data = lab_groups['bun'].sort_values("timestamp")
-
-            if not bun_data.empty and pd.notna(admit_ts) and bun_data["hours"].notna().any():
-                chart = alt.Chart(bun_data).mark_line(point=True, color='#06b6d4').encode(
-                    x=alt.X("hours:Q",
-                            title="Hours since admission",
-                            scale=alt.Scale(domain=[0, max_tick]),
-                            axis=alt.Axis(values=tick_vals)),
-                    y=alt.Y("value:Q", title="BUN (mg/dL)"),
-                    tooltip=["timestamp:T", "hours:Q", "value:Q"]
-                )
-                if not intervals_df.empty:
-                    final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
-                else:
-                    final = chart
-                st.altair_chart(final, use_container_width=True)
-            else:
-                st.warning("No BUN values available.")
-
-        # Tab 5: Lasix
-        with tabs[5]:
-            st.markdown("**Lasix Administration**")
-            lasix_data = case_inputs[
-                case_inputs["unit"].astype(str).str.lower().isin(["mg", "milligram"])].copy()
-
-            if not lasix_data.empty and pd.notna(admit_ts) and lasix_data["start_hours"].notna().any():
-                lasix_data["value_numeric"] = pd.to_numeric(lasix_data["value"], errors='coerce')
-                lasix_data = lasix_data.dropna(subset=['value_numeric', 'start_hours'])
-
-                if lasix_data.empty:
-                    st.warning("Lasix doses found but values are invalid.")
-                else:
-                    chart = alt.Chart(lasix_data).mark_point(
-                        shape='triangle-down',
-                        size=200,
-                        filled=True,
-                        color="#10b981"
-                    ).encode(
-                        x=alt.X("start_hours:Q",
-                                title="Hours since admission",
-                                scale=alt.Scale(domain=[0, max_tick]),
-                                axis=alt.Axis(values=tick_vals)),
-                        y=alt.Y("value_numeric:Q",
-                                title="Lasix Dose (mg)",
-                                scale=alt.Scale(zero=True)),
-                        tooltip=[
-                            alt.Tooltip("starttime:T", title="Given at"),
-                            alt.Tooltip("start_hours:Q", title="Hours since admission", format=".1f"),
-                            alt.Tooltip("value_numeric:Q", title="Dose (mg)", format=".0f")
-                        ]
-                    ).properties(height=300)
-
-                    if not intervals_df.empty:
-                        final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
-                    else:
-                        final = chart
-                    st.altair_chart(final, use_container_width=True)
-
-                    total_dose = lasix_data["value_numeric"].sum()
-                    num_doses = len(lasix_data)
-                    st.caption(f"Total: {total_dose:.0f} mg across {num_doses} dose(s)")
-            else:
-                st.warning("No Lasix administration data available.")
-
-        # Tab 6: IV Intake
-        with tabs[6]:
-            st.markdown("**Daily IV Fluid Intake (mL)**")
-            case_iv = iv_intake_df[iv_intake_df["case_id"].astype(str) == case_id].copy()
-
-            if not case_iv.empty and pd.notna(admit_ts):
-                # Compute hours since admission for start and end
-                case_iv["start_hours"] = (case_iv["day_start"] - admit_ts).dt.total_seconds() / 3600.0
-                case_iv["end_hours"] = (case_iv["day_end"] - admit_ts).dt.total_seconds() / 3600.0
-                case_iv["intake_ml"] = pd.to_numeric(case_iv["intake_ml"], errors="coerce")
-                case_iv = case_iv.dropna(subset=["start_hours", "end_hours", "intake_ml"])
-
-                if case_iv.empty:
-                    st.warning("IV intake data found but values are invalid.")
-                else:
-                    # Label each bar with its time range for tooltip
-                    case_iv["period"] = (
-                            case_iv["start_hours"].round(1).astype(str) + "h – " +
-                            case_iv["end_hours"].round(1).astype(str) + "h"
+            if not intervals_df.empty:
+                layers.append(
+                    alt.Chart(intervals_df).mark_rect(opacity=0.4).encode(
+                        x=alt.X("start:Q", scale=alt.Scale(domain=[x_start, max_tick])),
+                        x2="end:Q",
+                        color=alt.Color("label:N",
+                                        legend=alt.Legend(title="Care Setting"),
+                                        scale=alt.Scale(domain=["ED", "ICU", "Hospital"],
+                                                        range=["#fde68a", "#bfdbfe", "#d1fae5"]))
                     )
+                )
 
-                    chart = alt.Chart(case_iv).mark_bar(color="#3b82f6", opacity=0.85).encode(
-                        x=alt.X("start_hours:Q",
-                                title="Hours since admission",
-                                scale=alt.Scale(domain=[0, max_tick]),
-                                axis=alt.Axis(values=tick_vals)),
-                        x2="end_hours:Q",
-                        y=alt.Y("intake_ml:Q",
-                                title="IV Intake (mL)",
-                                scale=alt.Scale(zero=True)),
-                        tooltip=[
-                            alt.Tooltip("period:N", title="Period"),
-                            alt.Tooltip("intake_ml:Q", title="Intake (mL)", format=".0f"),
-                        ]
-                    ).properties(height=300)
+            chart = alt.layer(*layers).resolve_scale(color="independent")
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.warning("No creatinine values available for this case.")
 
-                    if not intervals_df.empty:
-                        final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
-                    else:
-                        final = chart
-                    st.altair_chart(final, use_container_width=True)
+    # Tab 1: Urine Output
+    with tabs[1]:
+        st.markdown("**Urine Output (mL)**")
+        uo_data = lab_groups['uo'].sort_values("timestamp")
 
-                    total = case_iv["intake_ml"].sum()
-                    st.caption(f"Total IV intake: {total:,.0f} mL across {len(case_iv)} period(s)")
+        if not uo_data.empty and pd.notna(admit_ts) and uo_data["hours"].notna().any():
+            uo_data['source'] = uo_data['kind'].str.title()
+            chart = alt.Chart(uo_data).mark_point(size=70, filled=True).encode(
+                x=alt.X("hours:Q",
+                        title="Hours since admission",
+                        scale=alt.Scale(domain=[0, max_tick]),
+                        axis=alt.Axis(values=tick_vals)),
+                y=alt.Y("value:Q", title="Urine Output (mL)"),
+                color=alt.Color("source:N", legend=alt.Legend(title="Source")),
+                tooltip=["timestamp:T", "hours:Q", "value:Q", "source:N"]
+            )
+            if not intervals_df.empty:
+                final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
             else:
-                st.warning("No IV intake data available for this case.")
+                final = chart
+            st.altair_chart(final, use_container_width=True)
+        else:
+            st.warning("No urine output values available.")
 
-        # Tab 6: Procedures
-        with tabs[7]:
-            st.markdown("**Procedures**")
-            case_proc = proc_df[proc_df["case_id"].astype(str) == case_id].copy()
-            if not case_proc.empty:
-                case_proc = case_proc.drop(columns=["case_id"], errors="ignore")
-                st.dataframe(case_proc, use_container_width=True, hide_index=True)
-            else:
-                st.warning("No procedure data available for this case.")
+    # Tab 2: Blood Pressure
+    with tabs[2]:
+        st.markdown("**Blood Pressure (mmHg)**")
+        bp_data = lab_groups['bp'].sort_values("timestamp")
 
-        # Tab 7: Diagnoses
-        with tabs[8]:
-            st.markdown("**Diagnosis Codes**")
-            case_icd = icd_df[icd_df["case_id"].astype(str) == case_id].copy()
-            if not case_icd.empty:
-                case_icd = case_icd.drop(columns=["case_id"], errors="ignore")
-                st.dataframe(case_icd, use_container_width=True, hide_index=True)
+        if not bp_data.empty and pd.notna(admit_ts) and bp_data["hours"].notna().any():
+            bp_data['bp_type'] = bp_data['kind'].str.extract(r'(systolic|diastolic|mean)', expand=False)
+            bp_data['bp_type'] = bp_data['bp_type'].str.title()
+
+            chart = alt.Chart(bp_data).mark_line(point=True).encode(
+                x=alt.X("hours:Q",
+                        title="Hours since admission",
+                        scale=alt.Scale(domain=[0, max_tick]),
+                        axis=alt.Axis(values=tick_vals)),
+                y=alt.Y("value:Q", title="Blood Pressure (mmHg)"),
+                color=alt.Color("bp_type:N",
+                                legend=alt.Legend(title="BP Type"),
+                                scale=alt.Scale(domain=['Systolic', 'Diastolic', 'Mean'],
+                                                range=['#dc2626', '#2563eb', '#059669'])),
+                tooltip=["timestamp:T", "hours:Q", "value:Q", "bp_type:N", "kind:N"]
+            )
+            if not intervals_df.empty:
+                final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
             else:
-                st.warning("No diagnosis data available for this case.")
+                final = chart
+            st.altair_chart(final, use_container_width=True)
+        else:
+            st.warning("No blood pressure values available.")
+
+    # Tab 3: Temperature
+    with tabs[3]:
+        st.markdown("**Temperature (°F)**")
+        temp_data = lab_groups['temp'].sort_values("timestamp")
+
+        if not temp_data.empty and pd.notna(admit_ts) and temp_data["hours"].notna().any():
+            temp_unit = temp_data['unit'].iloc[0] if len(temp_data) > 0 else ''
+            y_min, y_max = (90, 105) if str(temp_unit).strip() in ['F', '°F', 'degF', 'f'] else (35, 42)
+            chart = alt.Chart(temp_data).mark_line(point=True, color='#f97316').encode(
+                x=alt.X("hours:Q",
+                        title="Hours since admission",
+                        scale=alt.Scale(domain=[0, max_tick]),
+                        axis=alt.Axis(values=tick_vals)),
+                y=alt.Y("value:Q",
+                        title=f"Temperature ({temp_unit})",
+                        scale=alt.Scale(domain=[y_min, y_max])),
+                tooltip=["timestamp:T", "hours:Q", "value:Q", "unit:N"]
+            )
+            if not intervals_df.empty:
+                final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
+            else:
+                final = chart
+            st.altair_chart(final, use_container_width=True)
+        else:
+            st.warning("No temperature values available.")
+
+    # Tab 4: Potassium
+    with tabs[4]:
+        st.markdown("**Potassium (mEq/L)**")
+        k_data = lab_groups['potassium'].sort_values("timestamp")
+
+        if not k_data.empty and pd.notna(admit_ts) and k_data["hours"].notna().any():
+            chart = alt.Chart(k_data).mark_line(point=True, color='#8b5cf6').encode(
+                x=alt.X("hours:Q",
+                        title="Hours since admission",
+                        scale=alt.Scale(domain=[0, max_tick]),
+                        axis=alt.Axis(values=tick_vals)),
+                y=alt.Y("value:Q", title="Potassium (mEq/L)"),
+                tooltip=["timestamp:T", "hours:Q", "value:Q"]
+            )
+            if not intervals_df.empty:
+                final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
+            else:
+                final = chart
+            st.altair_chart(final, use_container_width=True)
+        else:
+            st.warning("No potassium values available.")
+
+    # Tab 5: BUN
+    with tabs[5]:
+        st.markdown("**BUN (mg/dL)**")
+        bun_data = lab_groups['bun'].sort_values("timestamp")
+
+        if not bun_data.empty and pd.notna(admit_ts) and bun_data["hours"].notna().any():
+            chart = alt.Chart(bun_data).mark_line(point=True, color='#06b6d4').encode(
+                x=alt.X("hours:Q",
+                        title="Hours since admission",
+                        scale=alt.Scale(domain=[0, max_tick]),
+                        axis=alt.Axis(values=tick_vals)),
+                y=alt.Y("value:Q", title="BUN (mg/dL)"),
+                tooltip=["timestamp:T", "hours:Q", "value:Q"]
+            )
+            if not intervals_df.empty:
+                final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
+            else:
+                final = chart
+            st.altair_chart(final, use_container_width=True)
+        else:
+            st.warning("No BUN values available.")
+
+    # Tab 6: Lasix
+    with tabs[6]:
+        st.markdown("**Lasix Administration**")
+        lasix_data = case_inputs[
+            case_inputs["unit"].astype(str).str.lower().isin(["mg", "milligram"])].copy()
+
+        if not lasix_data.empty and pd.notna(admit_ts) and lasix_data["start_hours"].notna().any():
+            lasix_data["value_numeric"] = pd.to_numeric(lasix_data["value"], errors='coerce')
+            lasix_data = lasix_data.dropna(subset=['value_numeric', 'start_hours'])
+
+            if lasix_data.empty:
+                st.warning("Lasix doses found but values are invalid.")
+            else:
+                chart = alt.Chart(lasix_data).mark_point(
+                    shape='triangle-down',
+                    size=200,
+                    filled=True,
+                    color="#10b981"
+                ).encode(
+                    x=alt.X("start_hours:Q",
+                            title="Hours since admission",
+                            scale=alt.Scale(domain=[0, max_tick]),
+                            axis=alt.Axis(values=tick_vals)),
+                    y=alt.Y("value_numeric:Q",
+                            title="Lasix Dose (mg)",
+                            scale=alt.Scale(zero=True)),
+                    tooltip=[
+                        alt.Tooltip("starttime:T", title="Given at"),
+                        alt.Tooltip("start_hours:Q", title="Hours since admission", format=".1f"),
+                        alt.Tooltip("value_numeric:Q", title="Dose (mg)", format=".0f")
+                    ]
+                ).properties(height=300)
+
+                if not intervals_df.empty:
+                    final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
+                else:
+                    final = chart
+                st.altair_chart(final, use_container_width=True)
+
+                total_dose = lasix_data["value_numeric"].sum()
+                num_doses = len(lasix_data)
+                st.caption(f"Total: {total_dose:.0f} mg across {num_doses} dose(s)")
+        else:
+            st.warning("No Lasix administration data available.")
+
+    # Tab 7: IV Intake
+    with tabs[7]:
+        st.markdown("**Daily IV Fluid Intake (mL)**")
+        case_iv = iv_intake_df[iv_intake_df["case_id"].astype(str) == case_id].copy()
+
+        if not case_iv.empty and pd.notna(admit_ts):
+            case_iv["start_hours"] = (case_iv["day_start"] - admit_ts).dt.total_seconds() / 3600.0
+            case_iv["end_hours"] = (case_iv["day_end"] - admit_ts).dt.total_seconds() / 3600.0
+            case_iv["intake_ml"] = pd.to_numeric(case_iv["intake_ml"], errors="coerce")
+            case_iv = case_iv.dropna(subset=["start_hours", "end_hours", "intake_ml"])
+
+            if case_iv.empty:
+                st.warning("IV intake data found but values are invalid.")
+            else:
+                case_iv["period"] = (
+                    case_iv["start_hours"].round(1).astype(str) + "h – " +
+                    case_iv["end_hours"].round(1).astype(str) + "h"
+                )
+
+                chart = alt.Chart(case_iv).mark_bar(color="#3b82f6", opacity=0.85).encode(
+                    x=alt.X("start_hours:Q",
+                            title="Hours since admission",
+                            scale=alt.Scale(domain=[0, max_tick]),
+                            axis=alt.Axis(values=tick_vals)),
+                    x2="end_hours:Q",
+                    y=alt.Y("intake_ml:Q",
+                            title="IV Intake (mL)",
+                            scale=alt.Scale(zero=True)),
+                    tooltip=[
+                        alt.Tooltip("period:N", title="Period"),
+                        alt.Tooltip("intake_ml:Q", title="Intake (mL)", format=".0f"),
+                    ]
+                ).properties(height=300)
+
+                if not intervals_df.empty:
+                    final = alt.layer(chart, make_shade(max_tick)).resolve_scale(color="independent")
+                else:
+                    final = chart
+                st.altair_chart(final, use_container_width=True)
+
+                total = case_iv["intake_ml"].sum()
+                st.caption(f"Total IV intake: {total:,.0f} mL across {len(case_iv)} period(s)")
+        else:
+            st.warning("No IV intake data available for this case.")
+
+    # Tab 8: Procedures
+    with tabs[8]:
+        st.markdown("**Procedures**")
+        case_proc = proc_df[proc_df["case_id"].astype(str) == case_id].copy()
+        if not case_proc.empty:
+            case_proc = case_proc.drop(columns=["case_id"], errors="ignore")
+            st.dataframe(case_proc, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No procedure data available for this case.")
+
+    # Tab 9: Diagnoses
+    with tabs[9]:
+        st.markdown("**Diagnosis Codes**")
+        case_icd = icd_df[icd_df["case_id"].astype(str) == case_id].copy()
+        if not case_icd.empty:
+            case_icd = case_icd.drop(columns=["case_id"], errors="ignore")
+            st.dataframe(case_icd, use_container_width=True, hide_index=True)
+        else:
+            st.warning("No diagnosis data available for this case.")
 
 st.markdown("---")
 
