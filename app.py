@@ -583,10 +583,6 @@ if st.session_state.get("jump_to_top"):
     _scroll_top()
     st.session_state.jump_to_top = False
 
-with st.sidebar:
-    st.subheader("Access")
-    st.caption("Open access mode is enabled. All prior annotations from `prev_aki` and all structured data are visible to any viewer.")
-
 # ================== Load data from Google Sheets ==================
 try:
     sh = _open_sheet_cached()
@@ -707,10 +703,7 @@ else:
     case_inputs["start_hours"] = pd.NA
     case_inputs["end_hours"] = pd.NA
 
-st.caption(
-    f"Mode: **Open access** • "
-    f"Admission {st.session_state.case_idx + 1}/{len(admissions)} • "
-)
+st.caption(f"Admission {st.session_state.case_idx + 1}/{len(admissions)}")
 st.markdown(f"### {case_id} — {title}")
 
 # ================== Layout ==================
